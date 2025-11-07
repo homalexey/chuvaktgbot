@@ -4,3 +4,4 @@ beautifulsoup4
 wikipedia-api
 cloudscraper
 openai
+gunicorn
