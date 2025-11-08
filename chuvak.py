@@ -52,7 +52,7 @@ def get_wiktionary(term: str) -> str:
     try:
         url = f"https://ru.wiktionary.org/wiki/{urllib.parse.quote(term)}"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=6)
+        response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             for tag in soup(['script', 'style', 'sup', '.mw-editsection', '.reference']):
@@ -90,7 +90,7 @@ def get_lurk(term: str) -> str:
             browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
         )
         url = f"https://lurkmore.media/{encoded_term}"
-        response = scraper.get(url, timeout=10)
+        response = scraper.get(url, timeout=12)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             for tag in soup(['script', 'style', 'nav', 'header', 'footer', '.infobox', '.mw-editsection']):
@@ -115,7 +115,7 @@ def get_gramota(term: str) -> str:
     try:
         url = f"https://gramota.ru/poisk?query={urllib.parse.quote(term)}"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=6)
+        response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             result = soup.find('div', class_=re.compile(r'(card|result|search|entry)', re.IGNORECASE))
@@ -136,7 +136,7 @@ def get_academic(term: str) -> str:
     try:
         url = f"https://dic.academic.ru/dic.nsf/ru/{urllib.parse.quote(term)}"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=6)
+        response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             for tag in soup(['script', 'style', 'nav', 'footer', '.nav', '.footer']):
@@ -160,7 +160,7 @@ def get_urban(term: str) -> str:
     try:
         url = f"https://api.urbandictionary.com/v0/define?term={urllib.parse.quote(term)}"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=6)
+        response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             data = response.json()
             if data.get('list'):
@@ -226,7 +226,7 @@ async def process_query(update: Update, term: str):
         loop.run_in_executor(None, get_urban, term),
     ]
 
-    results = await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
     clean_facts = []
     for res in results:
@@ -297,3 +297,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
