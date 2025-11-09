@@ -52,44 +52,32 @@ def get_wikipedia(term: str) -> str:
 
 def get_wiktionary(term: str) -> str:
     try:
-        candidates = [term.strip(), term.strip().title(), term.strip().capitalize()]
-        candidates = list(dict.fromkeys(candidates))
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        for cand in candidates:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        variants = [term, term.lower(), term.capitalize(), term.upper()]
+        for cand in variants:
             url = f"https://ru.wiktionary.org/wiki/{urllib.parse.quote(cand)}"
-            try:
-                resp = requests.get(url, headers=headers, timeout=12)
-            except Exception as e:
-                logger.warning(f"Wiktionary request error for {cand}: {e}")
-                continue
-            if resp.status_code != 200:
-                logger.info(f"Wiktionary {cand} status {resp.status_code}")
-                continue
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            # сначала ищем блок "Значение", но fallback — первый параграф в main content
-            meaning_heading = soup.find('span', {'id': 'Значение'}) or soup.find('span', {'id': 'Значения'})
-            if meaning_heading:
-                parent = meaning_heading.find_parent()
-                if parent:
-                    ol = parent.find_next(['ol', 'ul'])
-                    if ol:
-                        text = ol.get_text(' ', strip=True)
-                        text = re.sub(r'\[\d+\]|\(.*?\)|\d+\.', '', text)
-                        text = re.sub(r'\s+', ' ', text).strip()
-                        if len(text) > 20:
-                            return f"🔹 *Викисловарь*: {text[:800]}…"
-            # fallback: первый <p> в main content
-            content = soup.find('div', {'class': 'mw-parser-output'})
-            if content:
-                p = content.find('p')
-                if p:
-                    txt = p.get_text(' ', strip=True)
-                    if len(txt) > 30:
-                        return f"🔹 *Викисловарь*: {txt[:600]}…"
-        return "🔹 *Викисловарь*: значение не найдено"
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, "html.parser")
+                content = soup.find("div", class_="mw-parser-output")
+                if content:
+                    p = content.find("p")
+                    if p and len(p.get_text(strip=True)) > 30:
+                        return f"🔹 *Викисловарь*: {p.get_text(' ', strip=True)[:600]}…"
+            elif resp.status_code == 404 and cand.isupper():
+                # Попробуем англ. версию
+                url_en = f"https://en.wiktionary.org/wiki/{urllib.parse.quote(cand)}"
+                resp = requests.get(url_en, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    p = soup.find("p")
+                    if p and len(p.get_text(strip=True)) > 30:
+                        return f"🔹 *Wiktionary (EN)*: {p.get_text(' ', strip=True)[:600]}…"
+        return "🔹 *Викисловарь*: не найдено"
     except Exception as e:
         logger.warning(f"Wiktionary error: {e}")
         return "🔹 *Викисловарь*: техническая ошибка"
+
 
 def get_lurk(term: str) -> str:
     """Парсит статью с Lurkmore.media (через cloudscraper)."""
@@ -100,6 +88,11 @@ def get_lurk(term: str) -> str:
         scraper = cloudscraper.create_scraper(
             browser={"browser": "chrome", "platform": "windows", "mobile": False}
         )
+        scraper.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36",
+            "Referer": "https://lurkmore.media/"
+        })
+
         response = scraper.get(url, timeout=12)
 
         if response.status_code != 200:
@@ -354,3 +347,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
