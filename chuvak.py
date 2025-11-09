@@ -9,7 +9,9 @@ from bs4 import BeautifulSoup
 import asyncio
 import cloudscraper
 import os
+import concurrent.futures
 from openai import OpenAI
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=6)
 
 # === НАСТРОЙКИ ===
 TELEGRAM_TOKEN = os.environ['TELEGRAM_TOKEN']
@@ -50,14 +52,22 @@ def get_wikipedia(term: str) -> str:
 
 def get_wiktionary(term: str) -> str:
     try:
-        url = f"https://ru.wiktionary.org/wiki/{urllib.parse.quote(term)}"
+        candidates = [term.strip(), term.strip().title(), term.strip().capitalize()]
+        candidates = list(dict.fromkeys(candidates))
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            for tag in soup(['script', 'style', 'sup', '.mw-editsection', '.reference']):
-                tag.decompose()
-            meaning_heading = soup.find('span', {'id': 'Значение'})
+        for cand in candidates:
+            url = f"https://ru.wiktionary.org/wiki/{urllib.parse.quote(cand)}"
+            try:
+                resp = requests.get(url, headers=headers, timeout=12)
+            except Exception as e:
+                logger.warning(f"Wiktionary request error for {cand}: {e}")
+                continue
+            if resp.status_code != 200:
+                logger.info(f"Wiktionary {cand} status {resp.status_code}")
+                continue
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            # сначала ищем блок "Значение", но fallback — первый параграф в main content
+            meaning_heading = soup.find('span', {'id': 'Значение'}) or soup.find('span', {'id': 'Значения'})
             if meaning_heading:
                 parent = meaning_heading.find_parent()
                 if parent:
@@ -68,114 +78,144 @@ def get_wiktionary(term: str) -> str:
                         text = re.sub(r'\s+', ' ', text).strip()
                         if len(text) > 20:
                             return f"🔹 *Викисловарь*: {text[:800]}…"
+            # fallback: первый <p> в main content
             content = soup.find('div', {'class': 'mw-parser-output'})
             if content:
                 p = content.find('p')
                 if p:
-                    text = p.get_text(' ', strip=True)
-                    if len(text) > 30:
-                        return f"🔹 *Викисловарь*: {text[:600]}…"
-            return "🔹 *Викисловарь*: значение не найдено"
-        else:
-            return "🔹 *Викисловарь*: страница не существует"
+                    txt = p.get_text(' ', strip=True)
+                    if len(txt) > 30:
+                        return f"🔹 *Викисловарь*: {txt[:600]}…"
+        return "🔹 *Викисловарь*: значение не найдено"
     except Exception as e:
         logger.warning(f"Wiktionary error: {e}")
         return "🔹 *Викисловарь*: техническая ошибка"
 
 def get_lurk(term: str) -> str:
+    """Парсит статью с Lurkmore.media (через cloudscraper)."""
     try:
-        term_norm = term.strip().title().replace(' ', '_')
-        encoded_term = urllib.parse.quote(term_norm)
+        term_norm = term.strip().replace(" ", "_").capitalize()
+        url = f"https://lurkmore.media/{urllib.parse.quote(term_norm)}"
+
         scraper = cloudscraper.create_scraper(
-            browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
+            browser={"browser": "chrome", "platform": "windows", "mobile": False}
         )
-        url = f"https://lurkmore.media/{encoded_term}"
         response = scraper.get(url, timeout=12)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            for tag in soup(['script', 'style', 'nav', 'header', 'footer', '.infobox', '.mw-editsection']):
-                tag.decompose()
-            content_div = soup.find('div', id='mw-content-text')
-            if content_div:
-                first_block = content_div.find(['p', 'div'])
-                if first_block:
-                    text = first_block.get_text(' ', strip=True)
-                    text = re.sub(r'\[.*?\]|\(.*?\)|\b(?:править|редактировать)\b', '', text)
-                    text = re.sub(r'\s+', ' ', text).strip()
-                    if len(text) > 30 and "Loading" not in text and "Cloudflare" not in text:
-                        return f"🔶 *Lurk.media*: {text[:900]}…"
-            return "🔶 *Lurk.media*: статья есть, но нет описания"
-        else:
+
+        if response.status_code != 200:
+            logger.info(f"Lurk.media {term} HTTP {response.status_code}")
             return "🔶 *Lurk.media*: страница не найдена"
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        # удалить мусор
+        for tag in soup(["script", "style", "nav", "header", "footer", "table", "sup"]):
+            tag.decompose()
+
+        content_div = soup.find("div", id="mw-content-text")
+        if not content_div:
+            return "🔶 *Lurk.media*: статья есть, но контент не найден"
+
+        # ищем первый параграф с нормальным текстом
+        p = content_div.find(["p", "div"], string=re.compile(r".{30,}"))
+        if not p:
+            return "🔶 *Lurk.media*: статья есть, но нет описания"
+
+        text = p.get_text(" ", strip=True)
+        text = re.sub(r"\[.*?\]|\(.*?\)", "", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text or len(text) < 30:
+            return "🔶 *Lurk.media*: статья пустая"
+
+        return f"🔶 *Lurk.media*: {text[:900]}…"
     except Exception as e:
-        logger.warning(f"Lurk.media error: {e}")
+        logger.warning(f"Lurk.media error for {term}: {e}")
         return "🔶 *Lurk.media*: ошибка загрузки"
 
 def get_gramota(term: str) -> str:
+    """Парсит результаты с gramota.ru."""
     try:
         url = f"https://gramota.ru/poisk?query={urllib.parse.quote(term)}"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            result = soup.find('div', class_=re.compile(r'(card|result|search|entry)', re.IGNORECASE))
-            if not result:
-                result = soup.find(['p', 'div'], string=re.compile(r'.{10,}'))
-            if result:
-                text = result.get_text(' ', strip=True)
-                if len(text) > 30 and not any(t in text for t in ["Подписка", "Реклама", "Слово дня", "©", "Грамота.ру"]):
-                    return f"📘 *Грамота.ру*: {text[:800]}…"
-            return "📘 *Грамота.ру*: не нашёл определения"
-        else:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=12)
+        if resp.status_code != 200:
+            logger.info(f"Gramota.ru {term} HTTP {resp.status_code}")
             return "📘 *Грамота.ру*: ошибка поиска"
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        # возможные контейнеры
+        result = soup.find("div", class_=re.compile(r"(card|result|entry|content)", re.I))
+        if not result:
+            result = soup.find("p", string=re.compile(r".{15,}"))
+
+        if result:
+            text = result.get_text(" ", strip=True)
+            # фильтрация мусора
+            if any(bad in text for bad in ["©", "Реклама", "Подписка", "Грамота.ру"]):
+                logger.debug(f"Gramota skipped noise for {term}")
+                return "📘 *Грамота.ру*: не нашёл определения"
+            return f"📘 *Грамота.ру*: {text[:800]}…"
+
+        return "📘 *Грамота.ру*: не нашёл определения"
     except Exception as e:
-        logger.warning(f"Gramota error: {e}")
+        logger.warning(f"Gramota error for {term}: {e}")
         return "📘 *Грамота.ру*: техническая ошибка"
 
 def get_academic(term: str) -> str:
+    """Парсит dic.academic.ru."""
     try:
         url = f"https://dic.academic.ru/dic.nsf/ru/{urllib.parse.quote(term)}"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            for tag in soup(['script', 'style', 'nav', 'footer', '.nav', '.footer']):
-                tag.decompose()
-            content = soup.find('div', class_=re.compile(r'(card|content|main)', re.I))
-            if not content:
-                content = soup
-            definition = content.find(['dd', 'p', 'div'], string=re.compile(r'.{10,}'))
-            if definition:
-                text = definition.get_text(' ', strip=True)
-                if len(text) > 25 and not any(t in text for t in ["См. также", "©", "Academic.ru", "Научно-технический", "Энциклопедический"]):
-                    return f"📚 *Academic.ru*: {text[:800]}…"
-            return "📚 *Academic.ru*: определение не найдено"
-        else:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=12)
+        if resp.status_code != 200:
+            logger.info(f"Academic.ru {term} HTTP {resp.status_code}")
             return "📚 *Academic.ru*: страница не найдена"
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tag in soup(["script", "style", "footer", "nav", "sup"]):
+            tag.decompose()
+
+        # возможные блоки контента
+        content = soup.find("div", class_=re.compile(r"(content|card|main|entry)", re.I)) or soup
+        # ищем первый параграф/описание
+        definition = content.find(["dd", "p", "div"], string=re.compile(r".{20,}"))
+        if not definition:
+            return "📚 *Academic.ru*: определение не найдено"
+
+        text = definition.get_text(" ", strip=True)
+        if len(text) < 25:
+            return "📚 *Academic.ru*: определение слишком короткое"
+        if any(bad in text for bad in ["©", "См. также", "Academic.ru"]):
+            return "📚 *Academic.ru*: не содержит определения"
+
+        return f"📚 *Academic.ru*: {text[:900]}…"
     except Exception as e:
-        logger.warning(f"Academic.ru error: {e}")
+        logger.warning(f"Academic error for {term}: {e}")
         return "📚 *Academic.ru*: техническая ошибка"
 
 def get_urban(term: str) -> str:
+    """Ищет определение в Urban Dictionary (англ.)."""
     try:
         url = f"https://api.urbandictionary.com/v0/define?term={urllib.parse.quote(term)}"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('list'):
-                definition = data['list'][0].get('definition', '').replace('\n', ' ').strip()
-                example = data['list'][0].get('example', '').replace('\n', ' ').strip()
-                if definition:
-                    text = definition
-                    if example and len(example) > 10:
-                        text += f" Пример: {example}"
-                    return f"🇺🇸 *Urban Dict*: {text[:800]}…"
-            return "🇺🇸 *Urban Dict*: не найдено"
-        else:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=12)
+        if response.status_code != 200:
+            logger.warning(f"UrbanDict HTTP {response.status_code} for {term}")
             return "🇺🇸 *Urban Dict*: ошибка API"
+
+        data = response.json()
+        if not data.get("list"):
+            return "🇺🇸 *Urban Dict*: не найдено"
+
+        # берём самое длинное определение
+        best = max(data["list"], key=lambda d: len(d.get("definition", "")))
+        definition = best.get("definition", "").replace("\n", " ").strip()
+        example = best.get("example", "").replace("\n", " ").strip()
+        text = definition
+        if example and len(example) > 10:
+            text += f" Пример: {example}"
+        return f"🇺🇸 *Urban Dict*: {text[:900]}…"
     except Exception as e:
-        logger.warning(f"Urban error: {e}")
+        logger.warning(f"UrbanDict error for {term}: {e}")
         return "🇺🇸 *Urban Dict*: техническая ошибка"
 
 # === ОБРАБОТЧИК СООБЩЕНИЙ ===
@@ -218,25 +258,43 @@ async def process_query(update: Update, term: str):
 
     loop = asyncio.get_event_loop()
     tasks = [
-        loop.run_in_executor(None, get_wikipedia, term),
-        loop.run_in_executor(None, get_wiktionary, term),
-        loop.run_in_executor(None, get_lurk, term),
-        loop.run_in_executor(None, get_gramota, term),
-        loop.run_in_executor(None, get_academic, term),
-        loop.run_in_executor(None, get_urban, term),
+        loop.run_in_executor(executor, get_wikipedia, term),
+        loop.run_in_executor(executor, get_wiktionary, term),
+        loop.run_in_executor(executor, get_lurk, term),
+        loop.run_in_executor(executor, get_gramota, term),
+        loop.run_in_executor(executor, get_academic, term),
+        loop.run_in_executor(executor, get_urban, term),
     ]
 
+    # важно: не падаем при исключениях отдельных задач
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    clean_facts = []
+    # Логируем подробно — это поможет дебагу в Render logs
+    for i, res in enumerate(results):
+        source = ["wikipedia","wiktionary","lurk","gramota","academic","urban"][i]
+        if isinstance(res, Exception):
+            logger.warning(f"[{term}] source={source} -> EXCEPTION: {res}")
+        else:
+            logger.info(f"[{term}] source={source} -> {len(str(res))} chars, preview: {str(res)[:120]!r}")
+
+    # Обрабатываем результаты — если элемент exception, превращаем в текст-ошибку
+    normalized = []
     for res in results:
-        if ":" in res:
+        if isinstance(res, Exception):
+            normalized.append("ошибка")
+        else:
+            normalized.append(res)
+
+    clean_facts = []
+    for res in normalized:
+        if isinstance(res, str) and ":" in res:
             content = res.split(":", 1)[1].strip()
-            if content and content not in ["…", "не найдено", "ошибка", "не найдена", "значение не найдено", "страница не найдена"]:
+            if content and content.lower() not in ["…", "не найдено", "ошибка", "не найдена", "значение не найдено", "страница не найдена"]:
                 clean_facts.append(res)
 
     if not clean_facts:
-        final_text = "Чувак сегодня не в форме, но вот что нарыл:\n" + "\n".join(results)
+        # покажем и что именно вернулось (полезно в логах)
+        final_text = "Чувак сегодня не в форме, но вот что нарыл:\n" + "\n".join(normalized)
     else:
         context = "\n".join(clean_facts)
         prompt = f'''
@@ -252,9 +310,9 @@ async def process_query(update: Update, term: str):
 Данные:
 {context}
 '''
-
         try:
-            print(f"[GROQ] Запрашиваю ответ для: {term}")
+            logger.info(f"[GROQ] Запрашиваю ответ для: {term}")
+            # Groq call (как у тебя было)
             llm_response = await loop.run_in_executor(None, lambda: groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[{"role": "user", "content": prompt}],
@@ -262,10 +320,9 @@ async def process_query(update: Update, term: str):
                 max_tokens=250
             ))
             final_text = llm_response.choices[0].message.content.strip()
-            print(f"[GROQ] Ответ: {final_text[:100]}...")
+            logger.info(f"[GROQ] Ответ: {final_text[:100]}...")
         except Exception as e:
             logger.error(f"Groq error: {e}")
-            print(f"[GROQ ERROR] {e}")
             final_text = "Чувак шарит, но сегодня лень объяснять. Вот что нашёл:\n" + "\n".join(clean_facts)
 
     response = f'🔍 *{term.capitalize()}*\n\n{final_text}\n\n— Обращайся, чувак'
@@ -297,4 +354,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
