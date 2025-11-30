@@ -236,7 +236,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await process_query(update, text)
             return
 
-        pattern = re.compile(r'^(чувак\s*,?\s+)(что\s+такое|кто\s+такой)\s+(.+)', re.IGNORECASE)
+        pattern = re.compile(r'^(чувак\s*,?\s+)(что\s+такое|кто\s+такой|кто\s+такая)\s+(.+)', re.IGNORECASE)
         match = pattern.search(text)
         if match:
             term = match.group(3).strip(' ?.')
@@ -347,4 +347,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
